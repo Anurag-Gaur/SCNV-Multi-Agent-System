@@ -36,8 +36,9 @@ function Sidebar({ authData, onLogout, onUploadClick, collapsed = false, setColl
 
         {collapsed && (
           <div className="sidebar__brand-mini" onClick={() => navigate('/')} style={{ cursor: 'pointer', fontWeight: 'bold', fontSize: '20px' }}>
-            <span style={{ color: 'var(--color-primary)' }}>A</span>
-            <span style={{ color: 'var(--color-secondary)' }}>N</span>
+            <span style={{ color: 'var(--color-primary)' }}>O</span>
+            <span style={{ color: 'var(--color-secondary)' }}>F</span>
+            <span style={{ color: 'var(--color-secondary)' }}>I</span>
           </div>
         )}
 
