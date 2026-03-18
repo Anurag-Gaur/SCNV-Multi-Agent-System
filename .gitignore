@@ -5,6 +5,10 @@ __pycache__/
 .env
 backend/.env
 
+node_modules/
+node-v*/
+*.exe
+
 # Large Data Sets
 data/
 docs/*.xlsx
