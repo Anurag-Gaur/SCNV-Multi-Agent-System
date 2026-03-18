@@ -1,0 +1,12 @@
+# Environments
+venv/
+backend/venv/
+__pycache__/
+.env
+backend/.env
+
+# Large Data Sets
+data/
+docs/*.xlsx
+*.csv
+*.xlsx
