@@ -172,16 +172,18 @@ function ChatPage({ sidebarCollapsed, setSidebarCollapsed, selectedAgent, setSel
 
   // Fetch SO re-routing alerts
   useEffect(() => {
-    const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
-    if (!token) return;
-    fetch(`${API_URL}/api/alerts/pending-so`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((r) => r.json())
-      .then((d) => setSoAlerts(d.alerts || []))
-      .catch(console.error);
+    (async () => {
+      const token = await getAuthToken();
+      if (!token) return;
+      fetch(`${API_URL}/api/alerts/pending-so`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((r) => r.json())
+        .then((d) => setSoAlerts(d.alerts || []))
+        .catch(console.error);
+    })();
   }, []);
-
+    
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
     <div className="chat-page">
@@ -377,7 +379,10 @@ function ChatPage({ sidebarCollapsed, setSidebarCollapsed, selectedAgent, setSel
       {/* Document Preview Modal */}
       {previewFile && (
         <PreviewModal
-          filename={previewFile}
+          filename={previewFile.filename}
+          url={previewFile.url}
+          inlineText={previewFile.inlineText}
+          inlineTitle={previewFile.inlineTitle}
           onClose={() => setPreviewFile(null)}
         />
       )}

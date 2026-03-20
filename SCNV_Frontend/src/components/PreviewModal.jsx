@@ -1,19 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import { X, FileText, Download, Loader2, AlertCircle } from 'lucide-react';
 import { API_URL } from '../config/constants';
+import { getAuthToken } from '../api/api';
 
-function PreviewModal({ filename, onClose }) {
+function PreviewModal({ filename, url, inlineText, inlineTitle, onClose }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    if (!filename) return;
+    if (inlineText) { setLoading(false); return; }
+    if (!filename && !url) return;
     setLoading(true);
     setError(null);
 
-    fetch(`${API_URL}/api/documents/preview/${filename}`)
-      .then(res => res.json())
+    const endpoint = filename
+      ? `${API_URL}/api/documents/preview/${encodeURIComponent(filename)}`
+      : `${API_URL}/api/documents/web/preview?url=${encodeURIComponent(url)}`;
+
+    Promise.resolve(getAuthToken())
+      .then((token) =>
+        fetch(endpoint, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }),
+      )
+      .then((res) => res.json())
       .then(d => {
         if (d.type === 'error') {
           setError(d.message);
@@ -26,9 +37,9 @@ function PreviewModal({ filename, onClose }) {
         setError("Failed to connect to preview service.");
         setLoading(false);
       });
-  }, [filename]);
+  }, [filename, url, inlineText]);
 
-  if (!filename) return null;
+  if (!filename && !url && !inlineText) return null;
 
   return (
     <div className="preview-modal-overlay" onClick={onClose}>
@@ -36,7 +47,7 @@ function PreviewModal({ filename, onClose }) {
         <header className="preview-modal-header">
           <div className="preview-title">
             <FileText size={18} />
-            <span>Document Preview: {filename}</span>
+            <span>Preview: {inlineTitle || filename || data?.title || url}</span>
           </div>
           <div className="preview-actions">
             <button className="preview-close-btn" onClick={onClose}>
@@ -46,7 +57,11 @@ function PreviewModal({ filename, onClose }) {
         </header>
 
         <div className="preview-modal-body">
-          {loading ? (
+          {inlineText ? (
+            <div className="preview-text-content">
+              <pre>{inlineText}</pre>
+            </div>
+          ) : loading ? (
             <div className="preview-placeholder">
               <Loader2 className="spin" size={32} />
               <p>Fetching document snapshot...</p>

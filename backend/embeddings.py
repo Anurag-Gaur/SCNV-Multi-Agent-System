@@ -113,12 +113,13 @@ def search_similar_decisions(
     cosine similarity.
     """
     from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import NullPool
 
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         return []
 
-    engine = create_engine(db_url)
+    engine = create_engine(db_url, poolclass=NullPool)
     query_embedding = get_embedding(query)
     embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
 

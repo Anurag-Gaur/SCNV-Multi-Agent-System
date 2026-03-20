@@ -27,6 +27,8 @@ import uuid
 import datetime
 import traceback
 from typing import Dict, Any, List
+import html as _html
+import httpx
  
 # LangChain / OpenAI
 from langchain_openai import ChatOpenAI
@@ -53,7 +55,8 @@ except Exception as e:
  
 # ── KPI Data Loading (for direct country KPI answers) ──────────────────────────
 KPI_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/synthetic/gap_extended"))
- 
+UPLOADS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/uploads"))
+
 def _load_kpi_json(filename):
     path = os.path.join(KPI_DATA_DIR, filename)
     if os.path.exists(path):
@@ -86,10 +89,10 @@ COUNTRY_MAP = {
  
 KPI_KEYWORDS = [
     "allocation efficiency", "productive", "unproductive", "kpi",
-    "country", "suboptimal", "sub-optimal", "sub optimal",
-    "efficiency", "monthly trend", "volume", "optimal allocation",
-    "transfer ratio", "customer %", "country kpi",
-    "efficiecy", "percent", "percetage", "allocation %",
+    "suboptimal", "sub-optimal", "sub optimal",
+    "monthly trend", "optimal allocation",
+    "transfer ratio", "country kpi",
+    "allocation percent", "allocation percentage"
 ]
  
  
@@ -196,9 +199,156 @@ def answer_kpi_query(query: str, country_code: str | None, llm) -> dict:
     }]
     return {"answer": answer, "sources": sources}
  
- 
+def _normalize_domain(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).hostname
+    except Exception:
+        return None
+
+
+async def _tavily_search(query: str, max_results: int = 3) -> list[dict]:
+    try:
+        from tavily import TavilyClient
+    except Exception:
+        return []
+
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        return []
+
+    client = TavilyClient(api_key=api_key)
+    data = client.search(query=query, max_results=max_results, include_answer=False, include_raw_content=False)
+    out: list[dict] = []
+    for r in (data or {}).get("results", [])[:max_results]:
+        url = r.get("url")
+        out.append(
+            {
+                "type": "web",
+                "title": r.get("title") or "Source",
+                "url": url,
+                "domain": _normalize_domain(url) or r.get("source") or "Source",
+                "snippet": r.get("content") or "",
+            }
+        )
+    return out
+
+
+async def _web_search(query: str, max_results: int = 3) -> list[dict]:
+    # Strictly use Tavily
+    return await _tavily_search(query, max_results=max_results)
+
+
+def _tokenize_query(query: str) -> list[str]:
+    terms = re.findall(r"[a-zA-Z0-9%_/-]{3,}", (query or "").lower())
+    # de-dup but preserve order
+    seen = set()
+    out = []
+    for t in terms:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out[:12]
+
+
+def _read_kb_file_excerpt(file_path: str, limit: int = 12000) -> str:
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext == ".docx":
+            from docx import Document
+            doc = Document(file_path)
+            text = "\n".join([p.text for p in doc.paragraphs if p.text])
+            return text[:limit]
+        elif ext in [".xlsx", ".xls"]:
+            import pandas as pd
+            try:
+                df = pd.read_excel(file_path, engine="openpyxl").fillna("")
+            except Exception:
+                # Fallback: Sometimes users upload CSVs named as .xlsx
+                df = pd.read_csv(file_path).fillna("")
+            return df.to_string()[:limit]
+        # Treat everything else as text where possible (txt, md, json, csv)
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read(limit)
+    except Exception:
+        return ""
+
+
+def _kb_search(query: str, max_results: int = 3) -> list[dict]:
+    """
+    Lightweight "knowledge base" retrieval over uploaded documents in data/uploads.
+    Returns sources shaped for the frontend chips: {type, source, page, confidence, text_snippet}
+    """
+    if not os.path.isdir(UPLOADS_DIR):
+        return []
+
+    terms = _tokenize_query(query)
+    if not terms:
+        return []
+
+    candidates = []
+    for name in os.listdir(UPLOADS_DIR):
+        if name.startswith("~$"):
+            continue
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in [".txt", ".md", ".csv", ".json", ".docx", ".xlsx", ".xls"]:
+            continue
+        path = os.path.join(UPLOADS_DIR, name)
+        if not os.path.isfile(path):
+            continue
+
+        excerpt = _read_kb_file_excerpt(path)
+        if not excerpt:
+            continue
+
+        low = excerpt.lower()
+        score = sum(low.count(t) for t in terms)
+        if score <= 0:
+            continue
+
+        # Create a snippet around the first matching term
+        first_idx = None
+        first_term = None
+        for t in terms:
+            idx = low.find(t)
+            if idx != -1:
+                first_idx = idx if first_idx is None else min(first_idx, idx)
+                first_term = t if first_term is None else first_term
+        start = max((first_idx or 0) - 140, 0)
+        end = min((first_idx or 0) + 420, len(excerpt))
+        snippet = excerpt[start:end].strip()
+        if start > 0:
+            snippet = "…" + snippet
+        if end < len(excerpt):
+            snippet = snippet + "…"
+
+        candidates.append((score, name, snippet))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    top = candidates[:max_results]
+    if not top:
+        return []
+
+    # Simple confidence heuristic based on relative term matches
+    max_score = max(s for s, _, _ in top) or 1
+    sources = []
+    for s, name, snippet in top:
+        sources.append(
+            {
+                "type": "kb",
+                "source": name,
+                "page": "1",
+                "confidence": round(min(0.95, 0.55 + (s / max_score) * 0.4), 2),
+                "text_snippet": snippet,
+            }
+        )
+    return sources
+
 @router.post("/")
 async def chat(req: ChatRequest):
+    print("=================== LOCAL CHAT.PY REACHED ===================", flush=True)
     try:
         if not orchestrator:
             return {"answer": "Error: Orchestrator offline.", "sources": []}
@@ -207,7 +357,7 @@ async def chat(req: ChatRequest):
         agent_id = req.agent_id
        
         # Check if it's a generic "What is" or "Explain" question to bypass specialized agents
-        generic_patterns = [r"^what is", r"^what are", r"^explain", r"^how does", r"^tell me about", r"^define", r"^what would", r"^what should", r"^why is"]
+        generic_patterns = [r"^\s*what is", r"^\s*what are", r"^\s*explain", r"^\s*how does", r"^\s*tell me about", r"^\s*define", r"^\s*what would", r"^\s*what should", r"^\s*why is"]
         is_generic = any(re.search(p, query_lower) for p in generic_patterns)
        
         # Initialize LLM early so it can be passed to specialized functions
@@ -215,26 +365,22 @@ async def chat(req: ChatRequest):
         if not api_key:
              return {"answer": "I'm the SCNV Assistant. You need to configure my OPENAI_API_KEY for full conversational access.", "sources": []}
         llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, openai_api_key=api_key)
- 
+  
         # ── Route 1: Country KPI Queries ──
-        # KPI keywords take precedence.
-        # If it's a generic question, only enter this route if KPI keywords are EXPLICITLY present.
         has_kpi_keywords = is_country_kpi_query(query_lower)
-        is_analyst_active = (agent_id == "analyst")
-       
-        # Condition:
-        # 1. We have explicit KPI keywords OR
-        # 2. Analyst agent is selected AND it's NOT a generic definition question
-        if has_kpi_keywords or (is_analyst_active and not is_generic):
+        
+        # Only answer KPI query if it actually has KPI keywords.
+        # Do not blindly rely on agent_id.
+        if has_kpi_keywords and not is_generic:
             country_code = detect_country(query_lower)
             return answer_kpi_query(req.message, country_code, llm)
  
         # ── Route 2: STO Classification Queries ──
         # Check for STO/Transfer keywords with word boundaries
-        sto_keywords = [r"\bsto\b", r"\bclassify\b", r"\btransfer\b", r"\bdc\b", r"\blateral\b"]
+        sto_keywords = [r"\bsto\b", r"stock transport order", r"run sto analysis", r"mock sto"]
         has_sto_keywords = any(re.search(p, query_lower) for p in sto_keywords)
        
-        if not is_generic and (agent_id == "orchestrator" or has_sto_keywords):
+        if has_sto_keywords and not is_generic:
             dummy_sto = {
                 "sto_id": f"MSG-{uuid.uuid4().hex[:6]}",
                 "source_location": "DC_North" if "dc" in query_lower else "Unknown",
@@ -290,8 +436,6 @@ async def chat(req: ChatRequest):
                         "Please provide a professional, explanatory summary of these findings and how they answer the user's query. "
                         "Highlight any key patterns or common outcomes."
                     ).format(req.message, context_str)
-                   
-                    from langchain_core.messages import HumanMessage
                     summary_res = llm.invoke([HumanMessage(content=summary_prompt)])
                     answer_text = summary_res.content
  
@@ -303,33 +447,164 @@ async def chat(req: ChatRequest):
                 pass  # Fall through to general chat
  
         # ── Route 4: General Question/Chat (LLM or SQL Agent) ──────────────────
+
+        api_key = os.getenv("OPENAI_API_KEY")
         db_url = os.getenv("DATABASE_URL")
-       
+        
+        if not api_key:
+             return {"answer": "I'm the SCNV Assistant. You need to configure my OPENAI_API_KEY for full conversational access.", "sources": []}
+        
+        llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0, openai_api_key=api_key)
+        
+        # Decide if the query is a database query (aggregations, specific tabular values etc) or a document query.
+        route_decision_sys = (
+            "Analyze the following query. Is it asking for structured/tabular data aggregations, specific metrics like 'value', 'volume', or 'count' from a database? "
+            "Or is it asking for unstructured textual explanations, constraints analysis, network graphs, or historical context from a document? "
+            "Reply with exactly 'SQL' or 'DOCUMENT'.\n\n"
+            f"Query: {req.message}"
+        )
+        try:
+            route_res = llm.invoke([HumanMessage(content=route_decision_sys)])
+            query_type = "SQL" if "SQL" in route_res.content.upper() else "DOCUMENT"
+        except:
+            query_type = "SQL"  # Default to SQL for analytical tool
+            
+        # ALWAYS fetch Supabase embeddings for extra context
+        try:
+            from embeddings import search_similar_decisions
+            supabase_decisions = search_similar_decisions(req.message, limit=3)
+            print(f"DEBUG: supabase_decisions count: {len(supabase_decisions)}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            supabase_decisions = []
+            
+        supabase_context = ""
+        if supabase_decisions:
+            supabase_context = "Relevant Knowledge Base Information (Supabase):\n" + "\n".join(
+                [f"- {d['summary']}" for d in supabase_decisions]
+            )
+
+        # If it's explicitly a Document query, or no DB exists, rely on KB uploaded files.
+        if query_type == "DOCUMENT" or not db_url:
+            kb_sources = _kb_search(req.message, max_results=3)
+            # Add Supabase semantic matches to the kb_sources array so the UI renders them
+            if supabase_decisions:
+                for d in supabase_decisions:
+                    kb_sources.append({
+                        "type": "pgvector",
+                        "source": "Supabase Knowledge Base (decision_embeddings)",
+                        "page": "N/A",
+                        "confidence": d.get("similarity", 0.9),
+                        "text_snippet": d['summary']
+                    })
+
+            # Only short-circuit if we actually have KB content — otherwise fall through to web/SQL
+            if kb_sources:
+                kb_context = "\n\n".join(
+                    [f"[{i+1}] File: {s['source']}\nExcerpt: {s['text_snippet']}" for i, s in enumerate(kb_sources)]
+                )
+                kb_prompt = (
+                    "You are a professional Supply Chain Assistant.\n"
+                    "If the user asks for specific data, facts, or statistics, you must use ONLY the excerpts from the knowledge base files below. "
+                    "If they ask for specific data and it is missing, explicitly state exactly: 'the data is not available in the database'.\n"
+                    "However, if the user asks for general advice, factors to consider, or hypothetical theoretical analysis, "
+                    "provide a detailed and professional supply chain response using your broader industry knowledge.\n"
+                    "IMPORTANT: Do not include any inline citations (e.g., [1]) or references list at the end of your response, "
+                    "as the UI will automatically display the data sources.\n\n"
+                    f"User question: {req.message}\n\n"
+                    f"Knowledge base excerpts:\n{kb_context}\n\n"
+                    f"{supabase_context}"
+                )
+                ans = llm.invoke([HumanMessage(content=kb_prompt)])
+                for idx, s in enumerate(kb_sources, 1):
+                    s["citation_number"] = idx
+                return {"answer": ans.content, "sources": kb_sources}
+
+        # Let the LLM judge if we should use public web.
+        # Only block web search for clearly enterprise-internal identifiers (not generic industry words).
+        use_web = False
+        sc_pattern = r"\b(sto|stos|dc north|dc south|dc east|dc west|dc central|plant alpha|plant beta|plant gamma|distribution center|kunnr_|sku_)\b"
+        if not re.search(sc_pattern, req.message.lower()):
+            try:
+                judge_sys = (
+                    "Decide if this user question likely requires current/public internet knowledge "
+                    "outside the enterprise database or uploaded documents.\n"
+                    "Return ONLY 'YES' or 'NO'.\n\n"
+                    f"Question: {req.message}"
+                )
+                judge = llm.invoke([HumanMessage(content=judge_sys)])
+                if isinstance(judge.content, str) and judge.content.strip().upper().startswith("Y"):
+                    use_web = True
+            except Exception:
+                pass
+
+        if use_web:
+            sources = await _web_search(req.message, max_results=3)
+            if sources:
+                numbered = "\n".join(
+                    [f"[{i+1}] {s.get('title','Source')} — {s.get('url','')}\nSnippet: {s.get('snippet','')}" for i, s in enumerate(sources)]
+                )
+                web_prompt = (
+                    "Answer the user's question using ONLY the information from the numbered web sources below. "
+                    "Cite claims with bracketed numbers like [1] or [1][2]. If the sources don't contain enough information, "
+                    "say so and still provide the most relevant parts you can.\n\n"
+                    f"User question: {req.message}\n\n"
+                    f"Sources:\n{numbered}"
+                )
+                ans = llm.invoke([HumanMessage(content=web_prompt)])
+                # Attach citation numbers for UI
+                for idx, s in enumerate(sources, 1):
+                    s["citation_number"] = idx
+                return {"answer": ans.content, "sources": sources}
+
         if db_url:
             db = SQLDatabase.from_uri(db_url)
             system_prompt = (
                 "You are the SCNV Assistant. "
                 f"The user says: '{req.message}'. "
-                "Use the database if relevant. If it is a general supply chain question, provide a detailed and professional answer."
+                "Use the database if relevant. If it is a general supply chain question, provide a detailed and professional answer.\n"
+                f"{supabase_context}\n"
+                "If the user asks for specific data, facts, or statistics and it is missing from the database or context, you must explicitly state exactly: 'the data is not available in the database'.\n"
+                "However, if the user asks for general advice, factors to consider, or theoretical analysis, provide a professional supply chain response."
             )
             agent_executor = create_sql_agent(llm, db=db, agent_type="openai-tools", verbose=True)
             response = agent_executor.invoke({"input": system_prompt})
             answer = response.get("output", "Sorry, I couldn't process that.")
             source_type = "sql_agent"
         else:
-            prompt = f"You are the SCNV Assistant. A user says: '{req.message}'. Reply as a supply chain expert."
+            prompt = f"You are the SCNV Assistant. A user says: '{req.message}'. Reply as a supply chain expert.\n\n{supabase_context}"
             response = llm.invoke([HumanMessage(content=prompt)])
             answer = response.content
             source_type = "llm"
        
+        # Build a meaningful snippet for the preview (NOT the AI's answer)
+        preview_snippet = ""
+        if supabase_context:
+            # Show the first Supabase KB record as preview
+            preview_snippet = next(
+                (d['summary'] for d in supabase_decisions if d.get('summary')),
+                supabase_context[:300]
+            )
+        elif source_type == "sql_agent":
+            # Fall back to reading the schema file header
+            try:
+                schema_path = os.path.join(KPI_DATA_DIR, "..", "database_schema.txt")
+                with open(os.path.abspath(schema_path), "r", encoding="utf-8") as f:
+                    preview_snippet = f.read(400)
+            except Exception:
+                preview_snippet = "SQL Database: Contains customer orders, STOs, plant master data, and allocation decisions."
+        else:
+            preview_snippet = "General supply chain knowledge base."
+
         return {
             "answer": answer,
             "sources": [{
                 "type": source_type,
-                "source": "enterprise_kb.docx",
+                "source": "database_schema.txt" if source_type == "sql_agent" else "knowledge_agent_log.txt",
                 "page": "1",
                 "confidence": 0.95,
-                "text_snippet": answer[:100]
+                "text_snippet": preview_snippet
             }]
         }
     except Exception as e:
