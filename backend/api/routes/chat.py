@@ -346,6 +346,58 @@ def _kb_search(query: str, max_results: int = 3) -> list[dict]:
         )
     return sources
 
+def _extract_first_json_object(text: str) -> dict | None:
+    """
+    Best-effort extraction for the first JSON object found in a model response.
+    Allows responses wrapped in code fences or with leading/trailing text.
+    """
+    if not text:
+        return None
+    try:
+        # Grab the first {...} block (non-greedy not always safe for nested braces,
+        # but good enough for our "single JSON object" contract).
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            return None
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+
+def _extract_sto_from_message(message: str, llm) -> dict:
+    """
+    Convert a user query into the minimal STO structure expected by the LangGraph orchestrator.
+
+    Expected STO dict keys:
+      - sto_id
+      - source_location
+      - destination_location
+      - sku_id
+      - quantity
+    """
+    extract_prompt = (
+        "Extract STO details from the user's message and return ONLY a single JSON object.\n"
+        "Return these keys (use null if not found):\n"
+        "- sto_id\n"
+        "- source_location\n"
+        "- destination_location\n"
+        "- sku_id\n"
+        "- quantity\n\n"
+        "Rules:\n"
+        "- source_location is the 'from' location (or source DC/plant id).\n"
+        "- destination_location is the 'to' location (or destination DC/plant id).\n"
+        "- sku_id is the material/SKU identifier.\n"
+        "- quantity is a number if present; otherwise null.\n"
+        "- If the message doesn't contain enough info, still return the keys with null values.\n\n"
+        f"User message:\n{message}"
+    )
+    try:
+        res = llm.invoke([HumanMessage(content=extract_prompt)])
+        parsed = _extract_first_json_object(getattr(res, "content", None) or "")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
 @router.post("/")
 async def chat(req: ChatRequest):
     print("=================== LOCAL CHAT.PY REACHED ===================", flush=True)
@@ -381,18 +433,26 @@ async def chat(req: ChatRequest):
         has_sto_keywords = any(re.search(p, query_lower) for p in sto_keywords)
        
         if has_sto_keywords and not is_generic:
-            dummy_sto = {
-                "sto_id": f"MSG-{uuid.uuid4().hex[:6]}",
-                "source_location": "DC_North" if "dc" in query_lower else "Unknown",
-                "destination_location": "Store_44",
-                "sku_id": "Laptops-X1" if "laptop" in query_lower else "Unknown",
-                "quantity": 50,
-                "event_type": "STO_CREATED"
+            # Extract the actual STO details from the user's text (instead of using hard-coded dummy data).
+            extracted = _extract_sto_from_message(req.message, llm)
+            quantity_val = extracted.get("quantity", None)
+            try:
+                quantity = float(quantity_val) if quantity_val is not None else 0.0
+            except Exception:
+                quantity = 0.0
+
+            sto = {
+                "sto_id": extracted.get("sto_id") or f"MSG-{uuid.uuid4().hex[:6]}",
+                "source_location": extracted.get("source_location") or "Unknown",
+                "destination_location": extracted.get("destination_location") or "Unknown",
+                "sku_id": extracted.get("sku_id") or "Unknown",
+                "quantity": quantity,
             }
-            # Fix: AgentState expects 'sto' and 'so' keys, not top-level attributes
+
+            # AgentState expects 'sto' and 'event_type' keys.
             initial_state_data = {
-                "sto": dummy_sto,
-                "event_type": dummy_sto.get("event_type", "STO_CREATED")
+                "sto": sto,
+                "event_type": "STO_CREATED",
             }
             final_state = orchestrator.process_event(initial_state_data)
            
