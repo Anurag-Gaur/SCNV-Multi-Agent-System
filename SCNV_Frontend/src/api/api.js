@@ -79,11 +79,11 @@ export async function loadSession(sessionId) {
 export async function saveSession({ sessionId, messages, agentId }) {
   await axios.post(
     `${API_URL}/api/history/sessions/new`,
-    { 
-      session_id: sessionId, 
-      messages, 
+    {
+      session_id: sessionId,
+      messages,
       title: messages[0]?.content?.substring(0, 30) || 'New Chat',
-      agent_id: agentId 
+      agent_id: agentId
     },
     { headers: getAuthHeaders() },
   );
@@ -95,10 +95,10 @@ export async function saveSession({ sessionId, messages, agentId }) {
  * @returns {{ answer: string, sources: Array }}
  */
 export async function sendMessage(message, sessionId, agentId) {
-  const res = await axios.post(`${API_URL}/api/chat/`, { 
-    message, 
+  const res = await axios.post(`${API_URL}/api/chat/`, {
+    message,
     session_id: sessionId,
-    agent_id: agentId 
+    agent_id: agentId
   }, {
     headers: getAuthHeaders(),
   });
