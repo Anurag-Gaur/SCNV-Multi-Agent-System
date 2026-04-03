@@ -70,6 +70,8 @@ def create_tables():
     print("Tables ready.")
 
 def insert_data(table, data, chunk_size=1000):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     with engine.begin() as conn:
         for i in range(0, len(data), chunk_size):
             chunk = data[i:i + chunk_size]
@@ -90,10 +92,16 @@ def insert_data(table, data, chunk_size=1000):
                         cleaned_row[k] = v
                 cleaned_chunk.append(cleaned_row)
             
-            # Using basic insert. For duplicates, this will fail on primary key, but for a fresh DB it's fine.
-            # We assume DB is fresh for these tables.
-            conn.execute(insert(table).values(cleaned_chunk))
-            print(f"Inserted {i + len(chunk)}/{len(data)} records into {table.name}...")
+            # Use PostgreSQL UPSERT to ignore duplicate primary keys
+            stmt = pg_insert(table).values(cleaned_chunk)
+            
+            # For tables with primary keys, ignore conflict.
+            # strategic_matrix uses an autoincrement ID, so it won't have conflicts unless forced.
+            if table.primary_key:
+                stmt = stmt.on_conflict_do_nothing()
+                
+            conn.execute(stmt)
+            print(f"Processed {min(i + len(chunk), len(data))}/{len(data)} records into {table.name}...")
 
 if __name__ == '__main__':
     print("Starting SAP Data Migration to Supabase via SQLAlchemy...")
