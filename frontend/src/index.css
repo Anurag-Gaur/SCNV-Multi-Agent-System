@@ -1,0 +1,41 @@
+/* ── Import app styles first ── */
+@import './styles/globals.css';
+@import './styles/components.css';
+@import './styles/auth.css';
+@import './styles/sidebar.css';
+@import './styles/chat.css';
+@import './styles/dashboard.css';
+
+/* ── Tailwind utilities ── */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── ReactFlow dark overrides ── */
+.react-flow__background { background: #000000; }
+.react-flow__controls {
+  background: #0A0A0A !important;
+  border: 1px solid #1F1F1F !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+.react-flow__controls-button {
+  background: #0A0A0A !important;
+  border-bottom: 1px solid #1F1F1F !important;
+  color: #A0A0A0 !important;
+}
+.react-flow__controls-button:hover { background: #111111 !important; color: #CCA23E !important; }
+.react-flow__controls-button svg { fill: currentColor !important; }
+.react-flow__minimap { background: #0A0A0A !important; border: 1px solid #1F1F1F !important; border-radius: 8px !important; }
+.react-flow__edge-path {
+  stroke: rgba(204, 162, 62, 0.55) !important;
+  stroke-width: 1.5px !important;
+}
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: #CCA23E !important;
+  stroke-width: 2px !important;
+}
+.react-flow__attribution { display: none; }
+.react-flow__minimap { display: none !important; }
+
